@@ -19,9 +19,17 @@
 
 #include <zmq/platform.hpp>
 
-#if ZMQ_HAVE_OPENPGM && defined ZMQ_HAVE_LINUX
+#if (ZMQ_HAVE_OPENPGM && defined ZMQ_HAVE_LINUX) ||\
+    defined ZMQ_HAVE_WINDOWS
 
+#ifdef ZMQ_HAVE_LINUX
 #include <pgm/pgm.h>
+#else
+#include <Winsock2.h>
+#include <Wsrm.h>
+#include <ws2spi.h>
+#endif
+
 #include <zmq/err.hpp>
 #include <string>
 #include <zmq/config.hpp>
@@ -42,6 +50,8 @@
 #   define zmq_log(n, ...)    do { if ((n) <= PGM_SOCKET_DEBUG_LEVEL) \
         { printf (__VA_ARGS__);}} while (0)
 #endif
+
+#ifdef ZMQ_HAVE_LINUX
 
 zmq::pgm_socket_t::pgm_socket_t (bool receiver_, const char *interface_, 
       size_t readbuf_size_) : 
@@ -630,4 +640,298 @@ bool zmq::pgm_socket_t::tsi_empty (const pgm_tsi_t *tsi_)
 
     return true;
 }
+
+
+#else
+
+zmq::pgm_socket_t::pgm_socket_t (bool receiver_, const char *interface_, 
+      size_t readbuf_size_) : 
+    receiver (receiver_),
+    port_number (0),
+    readbuf_size (readbuf_size_),
+    nbytes_rec (0),
+    nbytes_processed (0),
+    pgm_msgv_processed (0),
+    created_receiver_socket (false)
+{
+    zmq_log (1, "interface_  %s, %s(%i)\n", interface_, __FILE__, __LINE__);
+    
+    //  Check if we are encapsulating into UDP.
+    const char* iface = interface_;
+    if (strlen (iface) >= 4 && iface [0] == 'u' && 
+          iface [1] == 'd' && iface [2] == 'p' && 
+          iface [3] == ':') {
+    
+        //  Ms-pgm does not support udp encapsulation.
+        zmq_assert (false);
+    }
+ 
+    //  Parse port number.
+    char *port_delim = strchr ((char *)iface, ':');
+    zmq_assert (port_delim);
+    port_number = atoi (port_delim + 1);
+  
+    //  Store interface string.
+    zmq_assert (port_delim > iface);
+    zmq_assert (port_delim - iface < (int) sizeof (network) - 1);
+    memset (network, '\0', sizeof (network));
+    memset (multicast, '\0', sizeof (multicast));
+    
+    char *network_delim = strchr ((char *)iface, ';');
+    zmq_assert (network_delim);
+    memcpy (network, iface, strlen (iface) - strlen (network_delim));
+
+    memcpy (multicast, network_delim + 1, strlen (iface) - strlen(network) - strlen (port_delim) - 1);
+
+    zmq_log (1, "parsed: network  %s, port %i, %s(%i)\n", 
+        network, port_number, __FILE__, __LINE__);
+   
+    //  Open PGM transport.
+    open_transport ();
+}
+
+void zmq::pgm_socket_t::open_transport ()
+{
+    SOCKADDR_IN salocal;
+    SOCKADDR_IN sasession;
+
+    zmq_log (1, "Opening PGM: network  %s, port %i, %s(%i)\n",
+        network, port_number, __FILE__, __LINE__);
+    
+    //  Check if the machine supports PGM.
+    int	protocol_list[] = { IPPROTO_RM, 0 };
+    WSAPROTOCOL_INFOW*	lpProtocolBuf = NULL;
+    DWORD dwBufLen = 0;
+    int err;
+
+    //  Read size of lpProtocolBuf into dwBufLen.
+	int protocols = WSCEnumProtocols (protocol_list, lpProtocolBuf, &dwBufLen, &err);
+	if (protocols != SOCKET_ERROR)
+		zmq_assert (false);
+	
+	else if (err != WSAENOBUFS)
+		zmq_assert (false);
+	
+    //  Allocate needed space for lpProtocolBuf.
+    lpProtocolBuf = (WSAPROTOCOL_INFOW*)malloc (dwBufLen);
+	if (lpProtocolBuf == NULL)
+		zmq_assert (false);
+	
+    //  Get information about available protocols, the information will be
+    //  placed to lpProtocolBuf.
+	protocols = WSCEnumProtocols (protocol_list, lpProtocolBuf, &dwBufLen, &err);
+	if (SOCKET_ERROR == protocols) {
+		free (lpProtocolBuf);
+		zmq_assert (false);
+	}
+
+	bool found = FALSE;
+	for (int i = 0; i < protocols; i++) {
+
+        //  Look if pgm is in the list of supported protocols.
+		if (AF_INET == lpProtocolBuf[i].iAddressFamily &&
+			IPPROTO_RM == lpProtocolBuf[i].iProtocol &&
+			SOCK_RDM == lpProtocolBuf[i].iSocketType)
+		{
+            //  PGM is installed on this machine.
+			found = TRUE;
+			break;
+		}
+	}
+
+	if (!found) {
+
+        //  PGM is not installed.
+		fprintf (stderr, "PGM support is not installed on this machine.");
+		free (lpProtocolBuf);
+		zmq_assert (false);
+	}
+
+	free (lpProtocolBuf);
+        
+    //  Receiver transport.
+    if (receiver) {
+  
+        receiver_listener_socket = socket (AF_INET, SOCK_RDM, IPPROTO_RM);
+        wsa_assert (receiver_listener_socket != INVALID_SOCKET);
+                     
+        // The port (port_number) should match that
+        // which the sender specified in the connect call.
+        salocal.sin_family = AF_INET;
+        salocal.sin_port   = htons (port_number);	
+        salocal.sin_addr.s_addr = inet_addr (multicast);
+
+        int rc = bind (receiver_listener_socket, (SOCKADDR *) &salocal, sizeof(salocal));
+        wsa_assert (rc != SOCKET_ERROR);
+                  
+        rc = listen (receiver_listener_socket, 10);
+        wsa_assert (rc != SOCKET_ERROR);
+
+        //  Set the socket to non-blocking mode.
+        u_long flag = 1;
+        rc = ioctlsocket (receiver_listener_socket, FIONBIO, &flag);
+        wsa_assert (rc != SOCKET_ERROR);
+ 
+    //  Sender transport.
+    } else {
+
+        sender_socket = socket (AF_INET, SOCK_RDM, IPPROTO_RM);
+        wsa_assert (sender_socket != INVALID_SOCKET);
+        
+        salocal.sin_family = AF_INET;
+        salocal.sin_port   = htons (0);
+        salocal.sin_addr.s_addr = htonl (INADDR_ANY);
+
+        int rc = bind (sender_socket, (SOCKADDR *)&salocal, sizeof(salocal));
+        wsa_assert (rc != SOCKET_ERROR);
+        int to_preallocate = 0;
+
+        // Set socket options.
+        ULONG val = 1;
+	    setsockopt (sender_socket, IPPROTO_RM, RM_HIGH_SPEED_INTRANET_OPT, (char*)&val, 
+            sizeof(val));
+
+        //  Set the socket to non-blocking mode.
+        u_long flag = 1;
+        rc = ioctlsocket (sender_socket, FIONBIO, &flag);
+        wsa_assert (rc != SOCKET_ERROR);
+
+        // Set the outgoing interface.
+        ULONG send_iface;
+        send_iface = inet_addr (network);
+        rc = setsockopt (sender_socket, IPPROTO_RM, RM_SET_SEND_IF, 
+            (char *)&send_iface, sizeof(send_iface));
+        wsa_assert (rc != SOCKET_ERROR);
+
+        //  Set window size.
+        //  Parameter WindowSizeInBytes is calculated automaticaly as
+        //  send_window.WindowSizeInBytes = 
+        //  send_window.RateKbitsPerSec * send_window.WindowSizeInMSecs / 8.
+        zmq_assert (pgm_max_rte >= 1000);
+        zmq_assert (pgm_secs != 0);
+        RM_SEND_WINDOW send_window;
+        send_window.RateKbitsPerSec = (pgm_max_rte / 1024) * 8;
+        send_window.WindowSizeInMSecs = pgm_secs * 1000;
+        send_window.WindowSizeInBytes = 
+            send_window.RateKbitsPerSec * send_window.WindowSizeInMSecs / 8;
+        
+        //  Set multicast address and port number.
+        sasession.sin_family = AF_INET;
+        sasession.sin_port   = htons (port_number);
+        sasession.sin_addr.s_addr = inet_addr (multicast);
+        
+        rc = setsockopt (sender_socket, IPPROTO_RM, RM_RATE_WINDOW_SIZE, 
+            (char *) &send_window, sizeof (send_window));
+        wsa_assert (rc != SOCKET_ERROR);
+
+        //  Connect.
+        rc = connect (sender_socket, (SOCKADDR *)&sasession, sizeof(sasession));
+        wsa_assert (rc != SOCKET_ERROR);
+    }
+}
+
+zmq::pgm_socket_t::~pgm_socket_t ()
+{
+    close_transport ();
+}
+
+void zmq::pgm_socket_t::close_transport (void)
+{   
+    int rc = shutdown (sender_socket, SD_BOTH);
+	wsa_assert (rc);
+	
+    if (sender_socket != INVALID_SOCKET)
+        closesocket (sender_socket);
+    if (receiver_socket != INVALID_SOCKET)
+        closesocket (receiver_socket);
+}
+
+//   Get receiver fd.
+void zmq::pgm_socket_t::get_receiver_fd (int *recv_fd_)
+{
+    *recv_fd_ = receiver_socket;
+}
+
+//  Get receiver listener fd.
+void zmq::pgm_socket_t::get_receiver_listener_fd (int *list_fd_)
+{
+    *list_fd_ = receiver_listener_socket;
+}
+
+//  Set receiver fd.
+void zmq::pgm_socket_t::set_receiver_fd (int recv_fd_)
+{
+    receiver_socket = recv_fd_;
+}
+
+//   Get sender fd. 
+void zmq::pgm_socket_t::get_sender_fd (int *send_fd_)
+{
+    *send_fd_ = sender_socket;
+}
+
+//  Send data.
+size_t zmq::pgm_socket_t::send_data (unsigned char *data_, size_t data_len_)
+{
+    
+    int nbytes = send (sender_socket, (const char*) data_, data_len_, 0);
+    
+    //  If we can't send, because the window is full.
+    if (nbytes == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK)
+        nbytes = 0;
+      
+    wsa_assert (nbytes != SOCKET_ERROR);
+    
+    // We have to write all data as one packet.
+    if (nbytes > 0) {
+        zmq_assert (nbytes == (int) data_len_);
+    }
+
+    zmq_log (4, "wrote %iB, %s(%i)\n", (int)nbytes, __FILE__, __LINE__);
+
+    return nbytes;
+}
+
+//  Receive data of size pgm_max_tpdu.
+int zmq::pgm_socket_t::receive (void **raw_data_)
+{
+    //  Receive.
+    nbytes_rec = recv (receiver_socket, pgm_msgv, pgm_win_max_apdu, 0);
+    
+    if (nbytes_rec == 0) {
+    
+        //  Connection terminated.
+        zmq_log (1, "Connection terminated\n");
+        nbytes_rec = 0;
+        return 0;
+    }
+   
+    if (nbytes_rec == SOCKET_ERROR) {
+
+        if (WSAGetLastError () == WSAEWOULDBLOCK) {
+            
+            //  No data to read, wait until in_event.
+            return 0;
+        }
+
+        //  Data loss.
+        nbytes_rec = 0;
+        zmq_log (1, "Data Loss\n");
+        return -1;
+    }
+    
+    zmq_log (4, "received %i bytes\n", (int)nbytes_rec);
+          
+    zmq_assert (nbytes_rec > 0);
+
+    //  Copy received message into raw_data.
+    *raw_data_ = pgm_msgv;
+    zmq_assert (*raw_data_ != NULL);
+    int raw_data_len = nbytes_rec;
+    
+    zmq_log (4, "sendig up %i bytes\n", (int)raw_data_len);
+    
+    return raw_data_len;
+}
+#endif
 #endif

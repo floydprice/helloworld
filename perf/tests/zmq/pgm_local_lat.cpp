@@ -33,8 +33,10 @@ int main (int argc, char *argv [])
             << endl << "<roundtrip count>" << endl;
         cerr << "local exchange network: iface;mcast_group:port "
             "for raw PGM" << std::endl;
+#ifdef ZMQ_HAVE_LINUX
         cerr << "                        udp:iface;mcast_group:port "
             "for UDP encapsulation" << std::endl;
+#endif
         return 1;
     }
 
@@ -121,7 +123,11 @@ int main (int argc, char *argv [])
     api->send (ex_id, sync_message);
 
     //  Stop for a while that sync message is being send.
+#ifdef ZMQ_HAVE_LINUX
     sleep (1);
+#else
+    Sleep (1000);
+#endif
 
     //  Set 2 fixed decimal places.
     std::cout.setf(std::ios::fixed);

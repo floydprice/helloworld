@@ -39,7 +39,7 @@ namespace zmq
     {
     public:
 
-        static i_thread *create (dispatcher_t *dispatcher_);
+        ZMQ_EXPORT static i_thread *create (dispatcher_t *dispatcher_);
         
         //  i_thread implementation.
         int get_thread_id ();

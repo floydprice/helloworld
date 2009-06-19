@@ -74,7 +74,7 @@ zmq::i_engine *zmq::engine_factory_t::create_listener (
     }
 #endif
 
-#if defined ZMQ_HAVE_OPENPGM && defined ZMQ_HAVE_LINUX
+#if (defined ZMQ_HAVE_OPENPGM && defined ZMQ_HAVE_LINUX) || defined ZMQ_HAVE_WINDOWS
     else if (transport_type == "zmq.pgm") {
         zmq_assert (sender_);
         mux_t *mux = new mux_t (bp_hwm, bp_lwm);
@@ -132,7 +132,7 @@ zmq::i_engine *zmq::engine_factory_t::create (
         }
     }
 
-#if defined ZMQ_HAVE_OPENPGM && defined ZMQ_HAVE_LINUX
+#if (defined ZMQ_HAVE_OPENPGM && defined ZMQ_HAVE_LINUX) || defined ZMQ_HAVE_WINDOWS
     else if (transport_type == "zmq.pgm") {
         if (sender_)
             zmq_assert (false);
