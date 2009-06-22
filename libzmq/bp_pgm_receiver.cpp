@@ -498,7 +498,7 @@ void zmq::bp_pgm_receiver_t::send_to ()
     //  because there are no pipes to send messages to.
     //  So, if this is the first pipe in demux, start polling.
     if (!shutting_down && demux->no_pipes ())
-        poller->set_pollin (socket_handle);
+        poller->set_pollin (socket_listener_handle);
 }
 
 const char *zmq::bp_pgm_receiver_t::get_arguments ()
