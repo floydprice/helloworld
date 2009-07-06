@@ -12,7 +12,7 @@ $!  2009-06-08 pm - added logical name jzmq for java JNI image
 $! Use this to set the environment for a particular build version, e.g.,
 $! zmq-dev
 $!-
-$ baseLevel == "zmq-dev"       ! change this where required
+$ baseLevel == "zmq-100"       ! change this where required
 $!
 $ if p1 .eqs. ""
 $ then
